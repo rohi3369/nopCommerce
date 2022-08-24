@@ -1,7 +1,7 @@
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 using Microsoft.Extensions.FileProviders;
-using Nop.Core.Infrastructure;
 
 namespace Nop.Services.Media.RoxyFileman
 {
@@ -13,12 +13,25 @@ namespace Nop.Services.Media.RoxyFileman
         /// <param name="pathBase"></param>
         /// <param name="lang"></param>
         /// <returns>A task that represents the asynchronous operation</returns>
-        Task<RoxyFilemanConfig> CreateConfigurationAsync(string pathBase, string lang);
+        Task<RoxyFilemanConfig> GetOrCreateConfigurationAsync(string pathBase, string lang);
 
+        /// <summary>
+        /// Copy the directory with the embedded files and directories
+        /// </summary>
+        /// <param name="sourcePath">Path to the source directory</param>
+        /// <param name="destinationPath">Path to the destination directory</param>
         void CopyDirectory(string sourcePath, string destinationPath);
 
-        IEnumerable<(string relativePath, int countFiles, int countDirectories)> GetDirectories(string type, bool isRecursive = true, string rootDirectoryPath = "");
+        IEnumerable<RoxyDirectoryInfo> GetDirectories(string type, bool isRecursive = true, string rootDirectoryPath = "");
 
+        /// <summary>
+        /// Get files in the passed directory
+        /// </summary>
+        /// <param name="directoryPath">Path to the files directory</param>
+        /// <param name="type">Type of the files</param>
+        /// <returns>
+        /// The list of <see cref="RoxyImageInfo"/>
+        /// </returns>
         IEnumerable<RoxyImageInfo> GetFiles(string directoryPath = "", string type = "");
 
         /// <summary>
@@ -34,8 +47,8 @@ namespace Nop.Services.Media.RoxyFileman
         /// <summary>
         /// Moves a specified file to a new location, providing the option to specify a new file name
         /// </summary>
-        /// <param name="sourceFileName">The name of the file to move. Can include a relative or absolute path</param>
-        /// <param name="destFileName">The new path and name for the file</param>
+        /// <param name="sourcePath">The name of the file to move. Can include a relative or absolute path</param>
+        /// <param name="destinationPath">The new path and name for the file</param>
         void FileMove(string sourcePath, string destinationPath);
 
         /// <summary>
@@ -65,6 +78,8 @@ namespace Nop.Services.Media.RoxyFileman
         /// <param name="destinationPath">Path to the destination file</param>
         void CopyFile(string sourcePath, string destinationPath);
 
+        Task SaveFileAsync(string destinationPath, string fileName, string contentType, Stream fileStream);
+
         /// <summary>
         /// Create the new directory
         /// </summary>
@@ -77,5 +92,9 @@ namespace Nop.Services.Media.RoxyFileman
         /// </summary>
         /// <param name="path">Path to the directory</param>
         void DeleteDirectory(string path);
+
+        byte[] CreateImageThumbnail(string sourcePath, string contentType);
+
+        byte[] CreateZipArchiveFromDirectory(string path);
     }
 }

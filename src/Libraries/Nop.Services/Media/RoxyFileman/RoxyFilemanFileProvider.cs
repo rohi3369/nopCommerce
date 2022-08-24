@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.FileProviders;
 using Newtonsoft.Json;
@@ -18,7 +18,6 @@ namespace Nop.Services.Media.RoxyFileman
         #region Fields
 
         protected INopFileProvider _nopFileProvider;
-        private readonly IPictureService _pictureService;
         private readonly MediaSettings _mediaSettings;
 
         #endregion
@@ -30,9 +29,8 @@ namespace Nop.Services.Media.RoxyFileman
             _nopFileProvider = nopFileProvider;
         }
 
-        public RoxyFilemanFileProvider(INopFileProvider defaultFileProvider, IPictureService pictureService, MediaSettings mediaSettings) : this(defaultFileProvider)
+        public RoxyFilemanFileProvider(INopFileProvider defaultFileProvider, MediaSettings mediaSettings) : this(defaultFileProvider)
         {
-            _pictureService = pictureService;
             _mediaSettings = mediaSettings;
         }
 
@@ -41,34 +39,33 @@ namespace Nop.Services.Media.RoxyFileman
         #region Utils
 
         /// <summary>
-        /// Resize image by targetSize
+        /// Adjust image measures to target size
         /// </summary>
         /// <param name="image">Source image</param>
-        /// <param name="targetSize">Target size</param>
-        /// <returns>Image as array of byte[]</returns>
-        protected virtual (int, int) ImageResize(SKBitmap image, int targetSize)
+        /// <param name="maxWidth">Target width</param>
+        /// <param name="maxHeight">Target height</param>
+        /// <returns>Adjusted width and height</returns>
+        protected virtual (int width, int height) ValidateImageMeasures(SKBitmap image, int maxWidth = 0, int maxHeight = 0)
         {
             if (image == null)
                 throw new ArgumentNullException(nameof(image));
 
-            float width, height;
+            float width = Math.Min(image.Width, maxWidth);
+            float height = Math.Min(image.Height, maxHeight);
+
+            var targetSize = Math.Max(width, height);
+
             if (image.Height > image.Width)
             {
                 // portrait
-                width = image.Width * (targetSize / (float)image.Height);
+                width = image.Width * (targetSize / image.Height);
                 height = targetSize;
             }
             else
             {
                 // landscape or square
                 width = targetSize;
-                height = image.Height * (targetSize / (float)image.Width);
-            }
-
-            if ((int)width == 0 || (int)height == 0)
-            {
-                width = image.Width;
-                height = image.Height;
+                height = image.Height * (targetSize / image.Width);
             }
 
             return ((int)width, (int)height);
@@ -81,7 +78,7 @@ namespace Nop.Services.Media.RoxyFileman
         /// <returns>File type</returns>
         protected virtual string GetFileType(string subpath)
         {
-            var fileExtension = _nopFileProvider.GetFileExtension(subpath)?.ToLowerInvariant();
+            var fileExtension = Path.GetExtension(subpath)?.ToLowerInvariant();
 
             return fileExtension switch
             {
@@ -105,7 +102,12 @@ namespace Nop.Services.Media.RoxyFileman
 
         protected virtual string GetFullPath(string path)
         {
-            if (string.IsNullOrEmpty(path) || Path.IsPathRooted(path))
+            if (string.IsNullOrEmpty(path))
+                throw new RoxyFilemanException("NoFilesFound");
+
+            path = path.Trim(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+            if (Path.IsPathRooted(path))
                 throw new RoxyFilemanException("NoFilesFound");
 
             var fullPath = Path.GetFullPath(Path.Combine(Root, path));
@@ -161,7 +163,7 @@ namespace Nop.Services.Media.RoxyFileman
             var i = 0;
             while (GetFileInfo(Path.Combine(directoryPath, uniqueFileName)) is IFileInfo fileInfo && fileInfo.Exists)
             {
-                uniqueFileName = $"{_nopFileProvider.GetFileNameWithoutExtension(fileName)}-Copy-{++i}{_nopFileProvider.GetFileExtension(fileName)}";
+                uniqueFileName = $"{Path.GetFileNameWithoutExtension(fileName)}-Copy-{++i}{Path.GetExtension(fileName)}";
             }
 
             return uniqueFileName;
@@ -173,47 +175,23 @@ namespace Nop.Services.Media.RoxyFileman
                 .StartsWith(Root, StringComparison.OrdinalIgnoreCase);
         }
 
-        /// <summary>
-        /// Flush image on disk
-        /// </summary>
-        /// <param name="picture">Image to store on disk</param>
-        /// <returns>A task that represents the asynchronous operation</returns>
-        protected virtual async Task SaveImageOnDiskAsync(Picture picture, IFileInfo pictureInfo)
+        protected virtual byte[] ResizeImage(byte[] data, SKEncodedImageFormat format, int maxWidth, int maxHeight)
         {
-            var pictureBinary = await _pictureService.GetPictureBinaryByPictureIdAsync(picture.Id);
+            using var sourceStream = new SKMemoryStream(data);
+            using var inputData = SKData.Create(sourceStream);
+            using var image = SKBitmap.Decode(inputData);
 
-            if (pictureBinary?.BinaryData == null || pictureBinary?.BinaryData.Length == 0)
-                return;
-
-            using var sourceStream = new SKMemoryStream(pictureBinary.BinaryData);
-            using var image = SKBitmap.Decode(sourceStream);
-
-            var roxyConfig = Singleton<RoxyFilemanConfig>.Instance;
-
-            var maxWidth = image.Width > roxyConfig.MAX_IMAGE_WIDTH ? roxyConfig.MAX_IMAGE_WIDTH : 0;
-            var maxHeight = image.Height > roxyConfig.MAX_IMAGE_HEIGHT ? roxyConfig.MAX_IMAGE_HEIGHT : 0;
-
-            var (width, height) = ImageResize(image, maxWidth > maxHeight ? maxWidth : maxHeight);
+            var (width, height) = ValidateImageMeasures(image, maxWidth, maxHeight);
 
             var toBitmap = new SKBitmap(width, height, image.ColorType, image.AlphaType);
 
-            if (image.ScalePixels(toBitmap, SKFilterQuality.None))
-            {
-                using var mutex = new Mutex(false, pictureInfo.PhysicalPath);
-                mutex.WaitOne();
+            if (!image.ScalePixels(toBitmap, SKFilterQuality.None))
+                throw new Exception("Image scaling");
 
-                try
-                {
-                    var newImage = SKImage.FromBitmap(toBitmap);
-                    var imageData = newImage.Encode(GetImageFormatByMimeType(picture.MimeType), _mediaSettings.DefaultImageQuality);
+            var newImage = SKImage.FromBitmap(toBitmap);
+            var imageData = newImage.Encode(format, _mediaSettings.DefaultImageQuality);
 
-                    await _nopFileProvider.WriteAllBytesAsync(pictureInfo.PhysicalPath, imageData.ToArray());
-                }
-                finally
-                {
-                    mutex.ReleaseMutex();
-                }
-            }
+            return imageData.ToArray();
         }
 
         #endregion
@@ -230,6 +208,9 @@ namespace Nop.Services.Media.RoxyFileman
         /// </param>
         public virtual void DirectoryMove(string sourceDirName, string destDirName)
         {
+            if (destDirName.IndexOf(sourceDirName, StringComparison.InvariantCulture) == 0)
+                throw new RoxyFilemanException("E_CannotMoveDirToChild");
+
             var sourceDirInfo = new DirectoryInfo(GetFullPath(sourceDirName));
             if (!sourceDirInfo.Exists)
                 throw new RoxyFilemanException("E_MoveDirInvalisPath");
@@ -237,14 +218,14 @@ namespace Nop.Services.Media.RoxyFileman
             if (string.Equals(sourceDirInfo.FullName, Root, StringComparison.InvariantCultureIgnoreCase))
                 throw new RoxyFilemanException("E_MoveDir");
 
-            var newPath = Path.Combine(GetFullPath(destDirName), sourceDirInfo.Name);
-            var destinationDirInfo = new DirectoryInfo(newPath);
+            var newFullPath = Path.Combine(GetFullPath(destDirName), sourceDirInfo.Name);
+            var destinationDirInfo = new DirectoryInfo(newFullPath);
             if (destinationDirInfo.Exists)
                 throw new RoxyFilemanException("E_DirAlreadyExists");
 
             try
             {
-                _nopFileProvider.DirectoryMove(sourceDirInfo.FullName, destinationDirInfo.FullName);
+                sourceDirInfo.MoveTo(destinationDirInfo.FullName);
             }
             catch
             {
@@ -252,6 +233,11 @@ namespace Nop.Services.Media.RoxyFileman
             }
         }
 
+        /// <summary>
+        /// Locate a file at the given path by directly mapping path segments to physical directories.
+        /// </summary>
+        /// <param name="subpath">A path under the root directory</param>
+        /// <returns>The file information. Caller must check Microsoft.Extensions.FileProviders.IFileInfo.Exists property.</returns>
         public new IFileInfo GetFileInfo(string subpath)
         {
             if (string.IsNullOrEmpty(subpath))
@@ -263,19 +249,6 @@ namespace Nop.Services.Media.RoxyFileman
             if (Path.IsPathRooted(subpath))
                 return new NotFoundFileInfo(subpath);
 
-            var fileInfo = base.GetFileInfo(subpath);
-
-            if (fileInfo.Exists || !_pictureService.IsStoreInDbAsync().Result)
-                return fileInfo;
-
-            var virtualPath = string.Join("/", NopRoxyFilemanDefaults.DefaultRootDirectory, subpath);
-            var picture = _pictureService.GetPictureByPathAsync(virtualPath).Result;
-
-            if (picture is null)
-                return new NotFoundFileInfo(subpath);
-
-            SaveImageOnDiskAsync(picture, fileInfo).Wait();
-
             return base.GetFileInfo(subpath);
         }
 
@@ -285,7 +258,7 @@ namespace Nop.Services.Media.RoxyFileman
         /// <param name="pathBase"></param>
         /// <param name="lang"></param>
         /// <returns>A task that represents the asynchronous operation</returns>
-        public virtual async Task<RoxyFilemanConfig> CreateConfigurationAsync(string pathBase, string lang)
+        public virtual async Task<RoxyFilemanConfig> GetOrCreateConfigurationAsync(string pathBase, string lang)
         {
             //check whether the path base has changed, otherwise there is no need to overwrite the configuration file
             if (Singleton<RoxyFilemanConfig>.Instance?.RETURN_URL_PREFIX?.Equals(pathBase) ?? false)
@@ -324,27 +297,27 @@ namespace Nop.Services.Media.RoxyFileman
 
                 //no need user to configure
                 INTEGRATION = "custom",
-                RETURN_URL_PREFIX = pathBase,
-                DIRLIST = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=DIRLIST",
-                CREATEDIR = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=CREATEDIR",
-                DELETEDIR = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=DELETEDIR",
-                MOVEDIR = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=MOVEDIR",
-                COPYDIR = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=COPYDIR",
-                RENAMEDIR = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=RENAMEDIR",
-                FILESLIST = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=FILESLIST",
-                UPLOAD = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=UPLOAD",
-                DOWNLOAD = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=DOWNLOAD",
-                DOWNLOADDIR = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=DOWNLOADDIR",
-                DELETEFILE = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=DELETEFILE",
-                MOVEFILE = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=MOVEFILE",
-                COPYFILE = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=COPYFILE",
-                RENAMEFILE = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=RENAMEFILE",
-                GENERATETHUMB = $"{pathBase}/Admin/RoxyFileman/ProcessRequest?a=GENERATETHUMB"
+                RETURN_URL_PREFIX = $"{pathBase}/images/uploaded/",
+                DIRLIST = $"{pathBase}/Admin/RoxyFileman/DirectoriesList",
+                CREATEDIR = $"{pathBase}/Admin/RoxyFileman/CreateDirectory",
+                DELETEDIR = $"{pathBase}/Admin/RoxyFileman/DeleteDirectory",
+                MOVEDIR = $"{pathBase}/Admin/RoxyFileman/MoveDirectory",
+                COPYDIR = $"{pathBase}/Admin/RoxyFileman/CopyDirectory",
+                RENAMEDIR = $"{pathBase}/Admin/RoxyFileman/RenameDirectory",
+                FILESLIST = $"{pathBase}/Admin/RoxyFileman/FilesList",
+                UPLOAD = $"{pathBase}/Admin/RoxyFileman/UploadFiles",
+                DOWNLOAD = $"{pathBase}/Admin/RoxyFileman/DownloadFile",
+                DOWNLOADDIR = $"{pathBase}/Admin/RoxyFileman/DownloadDirectory",
+                DELETEFILE = $"{pathBase}/Admin/RoxyFileman/DeleteFile",
+                MOVEFILE = $"{pathBase}/Admin/RoxyFileman/MoveFile",
+                COPYFILE = $"{pathBase}/Admin/RoxyFileman/CopyFile",
+                RENAMEFILE = $"{pathBase}/Admin/RoxyFileman/RenameFile",
+                GENERATETHUMB = $"{pathBase}/Admin/RoxyFileman/CreateImageThumbnail"
             };
 
             //save the file
             var text = JsonConvert.SerializeObject(configuration, Formatting.Indented);
-            await _nopFileProvider.WriteAllTextAsync(filePath, text, Encoding.UTF8);
+            await File.WriteAllTextAsync(filePath, text, Encoding.UTF8);
 
             Singleton<RoxyFilemanConfig>.Instance = configuration;
 
@@ -356,7 +329,7 @@ namespace Nop.Services.Media.RoxyFileman
         /// </summary>
         /// <param name="type">Type of the file</param>
         /// <returns>A task that represents the asynchronous operation</returns>
-        public virtual IEnumerable<(string relativePath, int countFiles, int countDirectories)> GetDirectories(string type, bool isRecursive = true, string rootDirectoryPath = "")
+        public virtual IEnumerable<RoxyDirectoryInfo> GetDirectories(string type, bool isRecursive = true, string rootDirectoryPath = "")
         {
             foreach (var item in GetDirectoryContents(rootDirectoryPath))
             {
@@ -364,7 +337,10 @@ namespace Nop.Services.Media.RoxyFileman
                 {
                     var dirInfo = new DirectoryInfo(item.PhysicalPath);
 
-                    yield return (getRelativePath(item.Name), dirInfo.GetFiles().Count(x => isMatchType(x.Name)), dirInfo.GetDirectories().Length);
+                    yield return new RoxyDirectoryInfo(
+                        getRelativePath(item.Name),
+                        dirInfo.GetFiles().Count(x => isMatchType(x.Name)),
+                        dirInfo.GetDirectories().Length);
                 }
 
                 if (!isRecursive)
@@ -378,29 +354,37 @@ namespace Nop.Services.Media.RoxyFileman
             bool isMatchType(string name) => string.IsNullOrEmpty(type) || GetFileType(name) == type;
         }
 
+        /// <summary>
+        /// Get files in the passed directory
+        /// </summary>
+        /// <param name="directoryPath">Path to the files directory</param>
+        /// <param name="type">Type of the files</param>
+        /// <returns>
+        /// The list of <see cref="RoxyImageInfo"/>
+        /// </returns>
         public virtual IEnumerable<RoxyImageInfo> GetFiles(string directoryPath = "", string type = "")
         {
             var files = GetDirectoryContents(directoryPath);
 
             return files
-                .Where(x => isMatchType(x.Name))
+                .Where(f => !f.IsDirectory && isMatchType(f.Name))
                 .Select(f =>
                 {
-                    var (width, height) = getImageMeasures(f.CreateReadStream());
-                    return new RoxyImageInfo(getRelativePath(f.Name), f.LastModified, f.Length, width, height);
+                    using var skData = SKData.Create(f.CreateReadStream());
+                    var image = SKBitmap.DecodeBounds(skData);
+
+                    return new RoxyImageInfo(getRelativePath(f.Name), f.LastModified, f.Length, image.Width, image.Height);
                 });
 
             bool isMatchType(string name) => string.IsNullOrEmpty(type) || GetFileType(name) == type;
             string getRelativePath(string name) => Path.Combine(directoryPath, name);
-
-            (int width, int height) getImageMeasures(Stream imageStream)
-            {
-                using var skData = SKData.Create(imageStream);
-                var image = SKBitmap.DecodeBounds(skData);
-                return (image.Width, image.Height);
-            }
         }
 
+        /// <summary>
+        /// Moves a specified file to a new location, providing the option to specify a new file name
+        /// </summary>
+        /// <param name="sourcePath">The name of the file to move. Can include a relative or absolute path</param>
+        /// <param name="destinationPath">The new path and name for the file</param>
         public void FileMove(string sourcePath, string destinationPath)
         {
             var sourceFile = GetFileInfo(sourcePath);
@@ -414,7 +398,8 @@ namespace Nop.Services.Media.RoxyFileman
 
             try
             {
-                _nopFileProvider.FileMove(sourceFile.PhysicalPath, GetFullPath(destinationPath));
+                new FileInfo(sourceFile.PhysicalPath)
+                    .MoveTo(GetFullPath(destinationPath));
             }
             catch
             {
@@ -422,6 +407,11 @@ namespace Nop.Services.Media.RoxyFileman
             }
         }
 
+        /// <summary>
+        /// Copy the directory with the embedded files and directories
+        /// </summary>
+        /// <param name="sourcePath">Path to the source directory</param>
+        /// <param name="destinationPath">Path to the destination directory</param>
         public virtual void CopyDirectory(string sourcePath, string destinationPath)
         {
             var sourceDirInfo = new DirectoryInfo(GetFullPath(sourcePath));
@@ -440,9 +430,9 @@ namespace Nop.Services.Media.RoxyFileman
 
                 foreach (var file in sourceDirInfo.GetFiles())
                 {
-                    var filePath = Path.Combine(destinationDirInfo.FullName, file.Name);
-                    if (!_nopFileProvider.FileExists(filePath))
-                        file.CopyTo(filePath);
+                    var newFile = GetFileInfo(Path.Combine(destinationPath, file.Name));
+                    if (!newFile.Exists)
+                        file.CopyTo(Path.Combine(destinationDirInfo.FullName, file.Name));
                 }
 
                 foreach (var directory in sourceDirInfo.GetDirectories())
@@ -510,7 +500,7 @@ namespace Nop.Services.Media.RoxyFileman
 
             try
             {
-                _nopFileProvider.DeleteFile(GetFullPath(path));
+                File.Delete(GetFullPath(path));
             }
             catch
             {
@@ -539,7 +529,7 @@ namespace Nop.Services.Media.RoxyFileman
 
             try
             {
-                _nopFileProvider.FileCopy(sourceFile.PhysicalPath, GetFullPath(newFilePath));
+                File.Copy(sourceFile.PhysicalPath, GetFullPath(newFilePath));
             }
             catch
             {
@@ -587,6 +577,78 @@ namespace Nop.Services.Media.RoxyFileman
             {
                 throw new RoxyFilemanException("E_CannotDeleteDir");
             }
+        }
+
+        public virtual async Task SaveFileAsync(string destinationPath, string fileName, string contentType, Stream fileStream)
+        {
+            var uniqueFileName = GetUniqueFileName(destinationPath, Path.GetFileName(fileName));
+            var destinationFile = Path.Combine(destinationPath, uniqueFileName);
+
+            await using var stream = new FileStream(GetFullPath(destinationFile), FileMode.Create);
+
+            if (GetFileType(Path.GetExtension(uniqueFileName)) == "image")
+            {
+                using var memoryStream = new MemoryStream();
+                await fileStream.CopyToAsync(memoryStream);
+
+                var roxyConfig = Singleton<RoxyFilemanConfig>.Instance;
+
+                var imageData = ResizeImage(memoryStream.ToArray(),
+                    GetImageFormatByMimeType(contentType),
+                    roxyConfig.MAX_IMAGE_WIDTH,
+                    roxyConfig.MAX_IMAGE_HEIGHT);
+
+                await stream.WriteAsync(imageData, 0, imageData.Length);
+            }
+            else {
+                await fileStream.CopyToAsync(stream);
+            }
+        }
+
+        public virtual byte[] CreateImageThumbnail(string sourcePath, string contentType)
+        {
+            var imageInfo = GetFileInfo(sourcePath);
+
+            if (!imageInfo.Exists)
+                throw new RoxyFilemanException("Image not found");
+
+            var roxyConfig = Singleton<RoxyFilemanConfig>.Instance;
+
+            using var imageStream = imageInfo.CreateReadStream();
+            using var ms = new MemoryStream();
+
+            imageStream.CopyTo(ms);
+
+            return ResizeImage(
+                ms.ToArray(),
+                GetImageFormatByMimeType(contentType),
+                roxyConfig.THUMBS_VIEW_WIDTH,
+                roxyConfig.THUMBS_VIEW_HEIGHT);
+        }
+
+        public virtual byte[] CreateZipArchiveFromDirectory(string path)
+        {
+            var sourceDirInfo = new DirectoryInfo(GetFullPath(path));
+            if (!sourceDirInfo.Exists)
+                throw new RoxyFilemanException("E_CreateArchive");
+
+            using var memoryStream = new MemoryStream();
+
+            //ToArray() should be outside of the archive using
+            using (var archive = new ZipArchive(memoryStream, ZipArchiveMode.Create, true))
+            {
+                foreach (var file in sourceDirInfo.EnumerateFiles("*", SearchOption.AllDirectories))
+                {
+                    var fileRelativePath = file.FullName.Replace(sourceDirInfo.FullName, string.Empty)
+                        .TrimStart('\\');
+
+                    using var fileStream = file.OpenRead();
+                    using var fileStreamInZip = archive.CreateEntry(fileRelativePath).Open();
+                    fileStream.CopyTo(fileStreamInZip);
+                }
+            }
+
+            return memoryStream.ToArray();
         }
 
         #endregion

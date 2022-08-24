@@ -267,10 +267,9 @@ namespace Nop.Web.Framework.Infrastructure
             services.AddScoped<IRoxyFilemanFileProvider>(serviceProvider =>
             {
                 var fileProvider = serviceProvider.GetRequiredService<INopFileProvider>();
-                var pictureService = serviceProvider.GetRequiredService<IPictureService>();
                 var mediaSettings = serviceProvider.GetRequiredService<MediaSettings>();
 
-                return new RoxyFilemanFileProvider(fileProvider, pictureService, mediaSettings);
+                return new RoxyFilemanFileProvider(fileProvider, mediaSettings);
             });
 
             // services.AddScoped<IRoxyFilemanService>(serviceProvider =>

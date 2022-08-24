@@ -3,38 +3,30 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net;
-using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
-using Newtonsoft.Json;
 using Nop.Core;
-using Nop.Core.Domain.Media;
 using Nop.Core.Infrastructure;
 
 namespace Nop.Services.Media.RoxyFileman
 {
     public class RoxyFilemanService : IRoxyFilemanService
     {
-
         #region Fields
-
-        protected readonly IHttpContextAccessor _httpContextAccessor;
         protected readonly IRoxyFilemanFileProvider _fileProvider;
-        protected readonly IWorkContext _workContext;
-        protected readonly MediaSettings _mediaSettings;
+        private readonly IWorkContext _workContext;
 
         #endregion
 
         #region Ctor
 
-        public RoxyFilemanService(IHttpContextAccessor httpContextAccessor, IRoxyFilemanFileProvider fileProvider, IWorkContext workContext, MediaSettings mediaSettings)
+        public RoxyFilemanService(
+            IRoxyFilemanFileProvider fileProvider,
+            IWorkContext workContext)
         {
-            _httpContextAccessor = httpContextAccessor;
             _fileProvider = fileProvider;
             _workContext = workContext;
-            _mediaSettings = mediaSettings;
         }
 
         #endregion
@@ -57,137 +49,89 @@ namespace Nop.Services.Media.RoxyFileman
             var roxyConfig = Singleton<RoxyFilemanConfig>.Instance;
 
             var forbiddenUploads = roxyConfig.FORBIDDEN_UPLOADS.Trim().ToLowerInvariant();
+
             if (!string.IsNullOrEmpty(forbiddenUploads))
-            {
-                var forbiddenFileExtensions = new ArrayList(Regex.Split(forbiddenUploads, "\\s+"));
-                result = !forbiddenFileExtensions.Contains(fileExtension);
-            }
+                result = !Regex.Split(forbiddenUploads, "\\s+").Contains(fileExtension);
 
             var allowedUploads = roxyConfig.ALLOWED_UPLOADS.Trim().ToLowerInvariant();
             if (string.IsNullOrEmpty(allowedUploads))
                 return result;
 
-            var allowedFileExtensions = new ArrayList(Regex.Split(allowedUploads, "\\s+"));
-            return allowedFileExtensions.Contains(fileExtension);
-        }
-
-        protected virtual HttpResponse GetJsonResponse()
-        {
-            var response = GetHttpContext().Response;
-
-            response.Headers.TryAdd("Content-Type", "application/json");
-
-            return response;
-        }
-
-        /// <summary>
-        /// Get the http context
-        /// </summary>
-        /// <returns>Http context</returns>
-        protected virtual HttpContext GetHttpContext()
-        {
-            return _httpContextAccessor.HttpContext;
+            return Regex.Split(allowedUploads, "\\s+").Contains(fileExtension);
         }
 
         #endregion
 
-        public async Task ConfigureAsync()
+        #region Configuration
+
+        /// <summary>
+        /// Initial service configuration
+        /// </summary>
+        /// <param name="pathBase">The base path for the current request</param>
+        /// <returns>A task that represents the asynchronous operation</returns>
+        public async Task ConfigureAsync(string pathBase)
         {
-            var currentPathBase = _httpContextAccessor.HttpContext.Request.PathBase.ToString();
             var currentLanguage = await _workContext.GetWorkingLanguageAsync();
-
-            await _fileProvider.CreateConfigurationAsync(currentPathBase, currentLanguage.UniqueSeoCode);
+            await _fileProvider.GetOrCreateConfigurationAsync(pathBase, currentLanguage.UniqueSeoCode);
         }
 
-        public async Task CopyDirectoryAsync(string sourcePath, string destinationPath)
-        {
-            _fileProvider.CopyDirectory(sourcePath, destinationPath);
+        #endregion
 
-            var response = GetHttpContext().Response;
+        #region Directories
 
-            await response.WriteAsJsonAsync(new { res = "ok" });
-        }
-
-        public async Task CopyFileAsync(string sourcePath, string destinationPath)
-        {
-            _fileProvider.CopyFile(sourcePath, destinationPath);
-            var response = GetHttpContext().Response;
-
-            await response.WriteAsJsonAsync(new { res = "ok" });
-        }
-
-        public async Task CreateDirectoryAsync(string parentDirectoryPath, string name)
-        {
-            _fileProvider.CreateDirectory(parentDirectoryPath, name);
-
-            var response = GetHttpContext().Response;
-            await response.WriteAsJsonAsync(new { res = "ok" });
-        }
-
-        public Task CreateImageThumbnailAsync(string path)
-        {
-            throw new System.NotImplementedException();
-        }
-
-        public async Task DeleteDirectoryAsync(string path)
+        /// <summary>
+        /// Delete the directory
+        /// </summary>
+        /// <param name="path">Path to the directory</param>
+        public void DeleteDirectory(string path)
         {
             _fileProvider.DeleteDirectory(path);
-
-            var response = GetHttpContext().Response;
-            await response.WriteAsJsonAsync(new { res = "ok" });
         }
 
-        public async Task DeleteFileAsync(string path)
+        /// <summary>
+        /// Download the directory from the server as a zip archive
+        /// </summary>
+        /// <param name="path">Path to the directory</param>
+        public byte[] DownloadDirectory(string path)
         {
-            _fileProvider.DeleteFile(path);
-
-            var response = GetHttpContext().Response;
-
-            await response.WriteAsJsonAsync(new { res = "ok" });
+            return _fileProvider.CreateZipArchiveFromDirectory(path);
         }
 
-        public Task DownloadDirectoryAsync(string path)
+        /// <summary>
+        /// Copy the directory
+        /// </summary>
+        /// <param name="sourcePath">Path to the source directory</param>
+        /// <param name="destinationPath">Path to the destination directory</param>
+        public void CopyDirectory(string sourcePath, string destinationPath)
         {
-            throw new System.NotImplementedException();
+            _fileProvider.CopyDirectory(sourcePath, destinationPath);
         }
 
-        public async Task DownloadFileAsync(string path)
+        /// <summary>
+        /// Create the new directory
+        /// </summary>
+        /// <param name="parentDirectoryPath">Path to the parent directory</param>
+        /// <param name="name">Name of the new directory</param>
+        public virtual void CreateDirectory(string parentDirectoryPath, string name)
         {
-            var file = _fileProvider.GetFileInfo(path);
-
-            if (file.Exists)
-            {
-                var response = GetHttpContext().Response;
-                response.Clear();
-                response.Headers.ContentDisposition = $"attachment; filename=\"{WebUtility.UrlEncode(file.Name)}\"";
-                response.ContentType = MimeTypes.ApplicationForceDownload;
-                await response.SendFileAsync(file);
-            }
+            _fileProvider.CreateDirectory(parentDirectoryPath, name);
         }
 
-        public Task FlushAllImagesOnDiskAsync(bool removeOriginal = true)
+        /// <summary>
+        /// Get all available directories as a directory tree
+        /// </summary>
+        /// <param name="type">Type of the file</param>
+        /// <returns>List of directories</returns>
+        public IEnumerable<object> GetDirectoryList(string type)
         {
-            throw new System.NotImplementedException();
-        }
-
-        public Task FlushImagesOnDiskAsync(string directoryPath)
-        {
-            throw new System.NotImplementedException();
-        }
-
-        public string GetConfigurationFilePath()
-        {
-            throw new System.NotImplementedException();
-        }
-
-        public async Task GetDirectoriesAsync(string type)
-        {
-            // if (!_fileProvider.DirectoryExists(rootDirectoryPath))
-            //     throw new Exception("Invalid files root directory. Check your configuration.");
-
             var contents = _fileProvider.GetDirectories(type);
 
-            var result = new List<object>();
+            var result = new List<object>() { new
+                {
+                    p = "/",
+                    f = _fileProvider.GetFiles("/", type).Count(),
+                    d = 0
+                } };
 
             foreach (var (path, countFiles, countDirectories) in contents)
             {
@@ -199,14 +143,30 @@ namespace Nop.Services.Media.RoxyFileman
                 });
             }
 
-            var response = GetHttpContext().Response;
-
-            await response.WriteAsJsonAsync(result);
+            return result;
         }
 
-        public async Task GetFilesAsync(string directoryPath, string type)
+        /// <summary>
+        /// Move the directory
+        /// </summary>
+        /// <param name="sourcePath">Path to the source directory</param>
+        /// <param name="destinationPath">Path to the destination directory</param>
+        public void MoveDirectory(string sourcePath, string destinationPath)
         {
-            var result = _fileProvider.GetFiles(directoryPath, type)
+            if (destinationPath.IndexOf(sourcePath, StringComparison.InvariantCulture) == 0)
+                throw new RoxyFilemanException("E_CannotMoveDirToChild");
+
+            _fileProvider.DirectoryMove(sourcePath, destinationPath);
+        }
+
+        /// <summary>
+        /// Get files in the passed directory
+        /// </summary>
+        /// <param name="directoryPath">Path to the files directory</param>
+        /// <param name="type">Type of the files</param>
+        public IEnumerable<object> GetFiles(string directoryPath, string type)
+        {
+            return _fileProvider.GetFiles(directoryPath, type)
                 .Select(f => new
                 {
                     p = f.RelativePath.Replace("\\", "/"),
@@ -215,64 +175,105 @@ namespace Nop.Services.Media.RoxyFileman
                     w = f.Width,
                     h = f.Height
                 });
-
-            var response = GetHttpContext().Response;
-
-            await response.WriteAsJsonAsync(result);
         }
 
-        public bool IsAjaxRequest()
+        /// <summary>
+        /// Rename the directory
+        /// </summary>
+        /// <param name="sourcePath">Path to the source directory</param>
+        /// <param name="newName">New name of the directory</param>
+        public void RenameDirectory(string sourcePath, string newName)
         {
-            throw new System.NotImplementedException();
+            _fileProvider.RenameDirectory(sourcePath, newName);
         }
 
-        public async Task MoveDirectoryAsync(string sourcePath, string destinationPath)
+        /// <summary>
+        /// Upload files to a directory on passed path
+        /// </summary>
+        /// <param name="directoryPath">Path to directory to upload files</param>
+        /// <param name="files">Files sent with the HttpRequest</param>
+        /// <returns>A task that represents the asynchronous operation</returns>
+        public async Task UploadFilesAsync(string directoryPath, IEnumerable<IFormFile> files)
         {
-            if (destinationPath.IndexOf(sourcePath, StringComparison.InvariantCulture) == 0)
-                throw new RoxyFilemanException("E_CannotMoveDirToChild");
-
-            _fileProvider.DirectoryMove(sourcePath, destinationPath);
-
-            var response = GetHttpContext().Response;
-
-            await response.WriteAsJsonAsync(new { res = "ok" });
+            foreach (var formFile in files)
+            {
+                await _fileProvider.SaveFileAsync(directoryPath, formFile.FileName, formFile.ContentType, formFile.OpenReadStream());
+            }
         }
 
-        public async Task MoveFileAsync(string sourcePath, string destinationPath)
+        #endregion
+
+        #region Files
+
+        /// <summary>
+        /// Copy the file
+        /// </summary>
+        /// <param name="sourcePath">Path to the source file</param>
+        /// <param name="destinationPath">Path to the destination file</param>
+        public void CopyFile(string sourcePath, string destinationPath)
+        {
+            _fileProvider.CopyFile(sourcePath, destinationPath);
+        }
+
+        /// <summary>
+        /// Create the thumbnail of the image and write it to the response
+        /// </summary>
+        /// <param name="path">Path to the image</param>
+        /// <param name="contentType">The resulting MIME type</param>
+        public virtual byte[] CreateImageThumbnail(string path, string contentType)
+        {
+            return _fileProvider.CreateImageThumbnail(path, contentType);
+        }
+
+        /// <summary>
+        /// Delete the directory
+        /// </summary>
+        /// <param name="path">Path to the directory</param>
+        public void DeleteFile(string path)
+        {
+            _fileProvider.DeleteFile(path);
+        }
+
+        /// <summary>
+        /// Get filename and read-only content stream
+        /// </summary>
+        /// <param name="path">Path to the file</param>
+        public (Stream stream, string name) GetFileStream(string path)
+        {
+            var file = _fileProvider.GetFileInfo(path);
+
+            if (!file.Exists)
+                throw new FileNotFoundException();
+
+            return (file.CreateReadStream(), file.Name);
+        }
+
+        /// <summary>
+        /// Move the file
+        /// </summary>
+        /// <param name="sourcePath">Path to the source file</param>
+        /// <param name="destinationPath">Path to the destination file</param>
+        public void MoveFile(string sourcePath, string destinationPath)
         {
             if (!CanHandleFile(sourcePath) && !CanHandleFile(destinationPath))
                 throw new RoxyFilemanException("E_FileExtensionForbidden");
 
             _fileProvider.FileMove(sourcePath, destinationPath);
-
-            var response = GetHttpContext().Response;
-
-            await response.WriteAsJsonAsync(new { res = "ok" });
         }
 
-        public async Task RenameDirectoryAsync(string sourcePath, string newName)
-        {
-            _fileProvider.RenameDirectory(sourcePath, newName);
-            var response = GetHttpContext().Response;
-
-            await response.WriteAsJsonAsync(new { res = "ok" });
-        }
-
-        public async Task RenameFileAsync(string sourcePath, string newName)
+        /// <summary>
+        /// Rename the file
+        /// </summary>
+        /// <param name="sourcePath">Path to the source file</param>
+        /// <param name="newName">New name of the file</param>
+        public void RenameFile(string sourcePath, string newName)
         {
             if (!CanHandleFile(sourcePath) && !CanHandleFile(newName))
                 throw new RoxyFilemanException("E_FileExtensionForbidden");
 
             _fileProvider.RenameFile(sourcePath, newName);
-
-            var response = GetHttpContext().Response;
-
-            await response.WriteAsJsonAsync(new { res = "ok" });
         }
 
-        public Task UploadFilesAsync(string directoryPath)
-        {
-            throw new System.NotImplementedException();
-        }
+        #endregion
     }
 }

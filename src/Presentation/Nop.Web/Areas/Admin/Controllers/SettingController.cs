@@ -1130,7 +1130,7 @@ namespace Nop.Web.Areas.Admin.Controllers
             if (!await _permissionService.AuthorizeAsync(StandardPermissionProvider.ManageSettings))
                 return AccessDeniedView();
 
-            await _roxyFilemanService.FlushAllImagesOnDiskAsync();
+            //await _roxyFilemanService.FlushAllImagesOnDiskAsync();
 
             await _pictureService.SetIsStoreInDbAsync(!await _pictureService.IsStoreInDbAsync());
 
@@ -1140,7 +1140,7 @@ namespace Nop.Web.Areas.Admin.Controllers
             using (var scope = _serviceScopeFactory.CreateScope())
             {
                 var newRoxyFilemanService = EngineContext.Current.Resolve<IRoxyFilemanService>(scope);
-                await newRoxyFilemanService.ConfigureAsync();
+                await newRoxyFilemanService.ConfigureAsync(Request.PathBase.ToString());
             }
 
             //activity log
