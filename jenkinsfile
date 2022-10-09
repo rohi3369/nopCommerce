@@ -11,7 +11,7 @@ pipeline {
         }
         stage('build') {
             steps {
-            sh "NuGet" }
+            sh "dotnet build" }
         
         }
     }
