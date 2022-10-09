@@ -1,0 +1,22 @@
+pipeline {
+    agent { label 'dotnet' }
+    triggers {
+        pollSCM ('H */4 * * 1-5')
+    }
+    stages {
+        stage('scm') {
+            steps{
+            git branch:'develop', url:'https://github.com/rohi3369/nopCommerce.git'
+            }
+        }
+        stage('build') {
+            steps {
+            sh "dotnet build"}
+        }
+        stage('Archive results') {
+            steps {
+                junit '**/surefire-reports/*.xml'
+             }
+        }
+    }
+}
