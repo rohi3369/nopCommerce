@@ -11,12 +11,8 @@ pipeline {
         }
         stage('build') {
             steps {
-            sh "dotnet build"}
-        }
-        stage('Archive results') {
-            steps {
-                junit '**/surefire-reports/*.xml'
-             }
+            sh "dotnet sdk build"}
+        
         }
     }
 }
