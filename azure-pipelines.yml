@@ -1,6 +1,6 @@
 ---
 pool:
-  name: "sairohith77"
+  name: "soma"
   vmImage: ubuntu-22.04
 
 trigger:
